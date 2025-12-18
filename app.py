@@ -17,6 +17,25 @@ st.markdown("""
 3. 결과 파일을 다운로드하세요.
 """)
 
+def read_csv_with_encoding(file_obj, **kwargs):
+    """
+    CSV 파일을 읽을 때 한글 인코딩(utf-8, cp949 등)을 자동으로 찾아서 읽습니다.
+    """
+    encodings = ['utf-8', 'cp949', 'euc-kr']
+    
+    for enc in encodings:
+        try:
+            file_obj.seek(0)
+            return pd.read_csv(file_obj, encoding=enc, **kwargs)
+        except UnicodeDecodeError:
+            continue
+        except Exception:
+            continue
+            
+    # 모든 인코딩 실패 시 다시 utf-8로 시도하여 에러 발생시킴
+    file_obj.seek(0)
+    return pd.read_csv(file_obj, encoding='utf-8', **kwargs)
+
 def find_header_row(file_obj, file_ext):
     """
     업로드된 파일 객체에서 실제 데이터 헤더(수주NO. 등)가 있는 행 번호를 찾습니다.
@@ -25,7 +44,8 @@ def find_header_row(file_obj, file_ext):
         file_obj.seek(0) # 파일 포인터 초기화
         # 상위 15행만 읽어서 키워드 탐색
         if file_ext == '.csv':
-            df_temp = pd.read_csv(file_obj, header=None, nrows=15)
+            # 인코딩 자동 감지 함수 사용
+            df_temp = read_csv_with_encoding(file_obj, header=None, nrows=15)
         else:
             df_temp = pd.read_excel(file_obj, header=None, nrows=15)
 
@@ -35,7 +55,8 @@ def find_header_row(file_obj, file_ext):
             if any("수주" in s for s in row_str):
                 file_obj.seek(0) # 파일 포인터 다시 초기화 (실제 읽기를 위해)
                 return i
-    except:
+    except Exception as e:
+        # print(f"Header search failed: {e}")
         pass
     
     file_obj.seek(0)
@@ -79,11 +100,12 @@ if uploaded_files:
 
                 # (3) 데이터 읽기
                 if file_ext == '.csv':
-                    df = pd.read_csv(uploaded_file, header=header_idx)
+                    df = read_csv_with_encoding(uploaded_file, header=header_idx)
                 else:
                     df = pd.read_excel(uploaded_file, header=header_idx)
 
                 # (4) 유효한 데이터만 남기기 (수주NO가 있는 행만)
+                # 컬럼명에 '수주'가 포함된 컬럼 찾기
                 order_col = [c for c in df.columns if "수주" in str(c)]
                 
                 if order_col:
@@ -97,6 +119,8 @@ if uploaded_files:
                     # (6) 통합
                     master_df = pd.concat([master_df, df], ignore_index=True)
                     success_count += 1
+                else:
+                    error_log.append(f"⚠️ {filename}: '수주NO' 컬럼을 찾을 수 없음 (헤더 인식 실패)")
                 
             except Exception as e:
                 error_log.append(f"❌ {filename}: {str(e)}")
@@ -134,4 +158,8 @@ if uploaded_files:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("통합할 데이터가 없습니다. 파일 내용을 확인해주세요.")
+            st.error("통합할 데이터가 없습니다. 아래 로그를 확인해주세요.")
+            if error_log:
+                with st.expander("에러 상세 내용"):
+                    for err in error_log:
+                        st.write(err)
