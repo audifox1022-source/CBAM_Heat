@@ -12,9 +12,8 @@ st.set_page_config(page_title="CBAM 데이터 통합기", page_icon="🏭", layo
 st.title("🏭 열처리 작업지시서 통합 도구 (Web)")
 st.markdown("""
 **CSV 및 Excel 파일**을 업로드하면 하나의 파일로 합쳐줍니다.
-1. 아래 영역에 파일을 드래그하거나 선택하세요.
-2. [통합 시작] 버튼을 누르세요.
-3. 결과 파일을 다운로드하세요.
+* **(숫자)** 호기로 표시된 파일만 통합합니다.
+* **(단조)**로 표시된 파일은 자동으로 제외합니다.
 """)
 
 def read_csv_with_encoding(file_obj, **kwargs):
@@ -75,6 +74,7 @@ if uploaded_files:
     if st.button("데이터 통합 시작"):
         master_df = pd.DataFrame()
         success_count = 0
+        skip_count = 0
         error_log = []
         
         # 진행 상황바
@@ -85,15 +85,27 @@ if uploaded_files:
             try:
                 filename = uploaded_file.name
                 file_ext = os.path.splitext(filename)[1].lower()
-                status_text.text(f"처리 중: {filename}")
-
+                
                 # (1) 파일명에서 날짜와 호기 추출
-                # 예: "11월 작업... - 11-03(1).csv"
+                # 예: "11월 작업... - 11-03(1).csv" -> 호기: 1
+                # 예: "11월 작업... - 11-03(단조).csv" -> 호기: 단조
                 date_match = re.search(r"(\d{1,2}-\d{1,2})", filename)
-                furnace_match = re.search(r"\((.+?)\)", filename)
+                furnace_match = re.search(r"\((.+?)\)", filename) # 괄호 안 추출
 
                 work_date = date_match.group(1) if date_match else "날짜미상"
                 furnace_no = furnace_match.group(1) if furnace_match else "호기미상"
+
+                # -------------------------------------------------------
+                # [수정] 필터링 로직: '단조'가 포함된 경우 건너뛰기
+                # -------------------------------------------------------
+                if "단조" in furnace_no:
+                    status_text.text(f"⛔ 제외됨 (단조): {filename}")
+                    skip_count += 1
+                    # 진행률 업데이트 후 다음 파일로 넘어감
+                    progress_bar.progress((idx + 1) / len(uploaded_files))
+                    continue
+
+                status_text.text(f"🔄 처리 중: {filename}")
 
                 # (2) 헤더 위치 자동 탐색
                 header_idx = find_header_row(uploaded_file, file_ext)
@@ -120,7 +132,9 @@ if uploaded_files:
                     master_df = pd.concat([master_df, df], ignore_index=True)
                     success_count += 1
                 else:
-                    error_log.append(f"⚠️ {filename}: '수주NO' 컬럼을 찾을 수 없음 (헤더 인식 실패)")
+                    # 데이터는 읽었으나 '수주NO' 컬럼이 없는 경우
+                    pass
+                    # error_log.append(f"⚠️ {filename}: '수주NO' 컬럼 미발견 (데이터 없음)")
                 
             except Exception as e:
                 error_log.append(f"❌ {filename}: {str(e)}")
@@ -128,16 +142,16 @@ if uploaded_files:
             # 진행률 업데이트
             progress_bar.progress((idx + 1) / len(uploaded_files))
 
-        status_text.text("처리 완료!")
+        status_text.text("모든 작업 완료!")
 
         # -----------------------------------------------------------
         # 결과 출력 및 다운로드
         # -----------------------------------------------------------
         if not master_df.empty:
-            st.success(f"✅ 총 {success_count}개 파일 통합 완료!")
+            st.success(f"✅ 통합 완료! (총 {success_count}개 파일 합침, {skip_count}개 단조 파일 제외)")
             
             if error_log:
-                st.warning(f"⚠️ {len(error_log)}개 파일 처리 실패")
+                st.warning(f"⚠️ {len(error_log)}개 파일 처리 중 오류 발생")
                 with st.expander("실패 로그 확인"):
                     for err in error_log:
                         st.write(err)
@@ -158,8 +172,11 @@ if uploaded_files:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("통합할 데이터가 없습니다. 아래 로그를 확인해주세요.")
-            if error_log:
-                with st.expander("에러 상세 내용"):
-                    for err in error_log:
-                        st.write(err)
+            if skip_count > 0 and success_count == 0:
+                st.warning("단조 파일을 제외하고 나니 통합할 데이터가 없습니다.")
+            else:
+                st.error("통합할 데이터가 없습니다. 아래 로그를 확인해주세요.")
+                if error_log:
+                    with st.expander("에러 상세 내용"):
+                        for err in error_log:
+                            st.write(err)
