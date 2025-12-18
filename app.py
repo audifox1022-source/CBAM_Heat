@@ -3,66 +3,149 @@ import pandas as pd
 import re
 import io
 import os
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
 
 # -----------------------------------------------------------
 # Streamlit 페이지 설정
 # -----------------------------------------------------------
 st.set_page_config(page_title="CBAM 데이터 통합기", page_icon="🏭", layout="wide")
 
-st.title("🏭 열처리 작업지시서 통합 도구 (Web)")
+st.title("🏭 열처리 작업지시서 통합 도구 (Pro)")
 st.markdown("""
-**CSV 및 Excel 파일**을 업로드하면 하나의 파일로 합쳐줍니다.
+**CSV 및 Excel 파일**을 업로드하면 깔끔한 보고서 형태로 합쳐줍니다.
 * **(숫자)** 호기로 표시된 파일만 통합합니다.
-* **(단조)**로 표시된 파일은 자동으로 제외합니다.
+* **(단조)** 파일은 자동으로 제외합니다.
+* **컬럼명을 자동으로 통일**하여 데이터 누락을 방지합니다.
 """)
 
 def read_csv_with_encoding(file_obj, **kwargs):
-    """
-    CSV 파일을 읽을 때 한글 인코딩(utf-8, cp949 등)을 자동으로 찾아서 읽습니다.
-    """
+    """CSV 파일을 읽을 때 인코딩(utf-8, cp949 등) 자동 감지"""
     encodings = ['utf-8', 'cp949', 'euc-kr']
-    
     for enc in encodings:
         try:
             file_obj.seek(0)
             return pd.read_csv(file_obj, encoding=enc, **kwargs)
-        except UnicodeDecodeError:
+        except:
             continue
-        except Exception:
-            continue
-            
-    # 모든 인코딩 실패 시 다시 utf-8로 시도하여 에러 발생시킴
     file_obj.seek(0)
     return pd.read_csv(file_obj, encoding='utf-8', **kwargs)
 
 def find_header_row(file_obj, file_ext):
     """
-    업로드된 파일 객체에서 실제 데이터 헤더(수주NO. 등)가 있는 행 번호를 찾습니다.
+    실제 데이터 헤더가 있는 행 번호를 찾습니다.
+    (수주NO, 품명, 수량 등의 키워드가 많이 포함된 행을 헤더로 판단)
     """
     try:
-        file_obj.seek(0) # 파일 포인터 초기화
-        # 상위 15행만 읽어서 키워드 탐색
+        file_obj.seek(0)
         if file_ext == '.csv':
-            # 인코딩 자동 감지 함수 사용
-            df_temp = read_csv_with_encoding(file_obj, header=None, nrows=15)
+            df_temp = read_csv_with_encoding(file_obj, header=None, nrows=20)
         else:
-            df_temp = pd.read_excel(file_obj, header=None, nrows=15)
+            df_temp = pd.read_excel(file_obj, header=None, nrows=20)
+
+        # 헤더로 의심되는 키워드 목록
+        keywords = ['수주', 'NO', '품명', '품 명', '규격', '재질', '중량']
+        
+        max_score = 0
+        best_row = 0
 
         for i, row in df_temp.iterrows():
             row_str = row.astype(str).values
-            # '수주' 또는 'NO.' 라는 단어가 포함된 행을 헤더로 간주
-            if any("수주" in s for s in row_str):
-                file_obj.seek(0) # 파일 포인터 다시 초기화 (실제 읽기를 위해)
-                return i
+            # 해당 행에 키워드가 몇 개나 포함되어 있는지 점수 매기기
+            score = sum(1 for keyword in keywords if any(keyword in str(cell) for cell in row_str))
+            
+            if score > max_score:
+                max_score = score
+                best_row = i
+        
+        # 키워드가 2개 이상 발견된 행을 헤더로 인정, 아니면 0번째 줄
+        return best_row if max_score >= 2 else 0
+        
     except Exception as e:
-        # print(f"Header search failed: {e}")
-        pass
+        return 0
+
+def clean_column_names(df):
+    """
+    컬럼명을 표준화하여 데이터가 흩어지는 것을 방지합니다.
+    예: '품 명' -> '품명', '수주NO.' -> '수주NO'
+    """
+    # 1. 공백 제거 및 특수문자 정리
+    df.columns = df.columns.astype(str).str.replace(' ', '').str.replace('.', '').str.replace('\n', '')
     
-    file_obj.seek(0)
-    return 0 # 못 찾으면 첫 번째 줄을 헤더로
+    # 2. 유사한 컬럼명 통일 (매핑 테이블)
+    rename_map = {
+        '수주번호': '수주NO',
+        '지시서번호': '지시서NO',
+        '지시번호': '지시서NO',
+        '품목': '품명',
+        '재질': '재질',
+        '원소재': '재질'
+    }
+    
+    # 컬럼명 변경 적용
+    new_columns = {}
+    for col in df.columns:
+        for key, value in rename_map.items():
+            if key in col:
+                new_columns[col] = value
+                break
+    
+    if new_columns:
+        df = df.rename(columns=new_columns)
+        
+    return df
+
+def style_excel(writer, df):
+    """엑셀 파일에 테두리, 배경색, 열 너비 자동 맞춤 적용"""
+    workbook = writer.book
+    worksheet = writer.sheets['Sheet1']
+    
+    # 스타일 정의
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+    border_style = Border(left=Side(style='thin'), right=Side(style='thin'), 
+                          top=Side(style='thin'), bottom=Side(style='thin'))
+    center_align = Alignment(horizontal='center', vertical='center')
+
+    # 1. 헤더 스타일 적용
+    for col_num, value in enumerate(df.columns.values):
+        cell = worksheet.cell(row=1, column=col_num + 1)
+        cell.value = value
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+        cell.border = border_style
+
+    # 2. 데이터 스타일 적용 및 열 너비 자동 조정
+    for i, col in enumerate(df.columns):
+        max_length = 0
+        column = col
+        
+        # 헤더 길이 측정
+        try:
+            if len(str(column)) > max_length:
+                max_length = len(str(column))
+        except:
+            pass
+
+        # 데이터 길이 측정 (상위 100개만 샘플링하여 속도 향상)
+        for cell in worksheet[get_column_letter(i+1)][1:101]: 
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+                cell.border = border_style # 테두리 적용
+            except:
+                pass
+        
+        # 열 너비 설정 (최대 50으로 제한)
+        adjusted_width = (max_length + 2)
+        if adjusted_width > 50:
+            adjusted_width = 50
+        worksheet.column_dimensions[get_column_letter(i+1)].width = adjusted_width
 
 # -----------------------------------------------------------
-# 파일 업로더 (CSV, Excel 모두 지원)
+# 메인 로직
 # -----------------------------------------------------------
 uploaded_files = st.file_uploader(
     "여기에 파일을 드래그하세요 (CSV, XLSX, XLS)", 
@@ -77,7 +160,6 @@ if uploaded_files:
         skip_count = 0
         error_log = []
         
-        # 진행 상황바
         progress_bar = st.progress(0)
         status_text = st.empty()
 
@@ -86,60 +168,57 @@ if uploaded_files:
                 filename = uploaded_file.name
                 file_ext = os.path.splitext(filename)[1].lower()
                 
-                # (1) 파일명에서 날짜와 호기 추출
-                # 예: "11월 작업... - 11-03(1).csv" -> 호기: 1
-                # 예: "11월 작업... - 11-03(단조).csv" -> 호기: 단조
+                # (1) 파일명 분석
                 date_match = re.search(r"(\d{1,2}-\d{1,2})", filename)
-                furnace_match = re.search(r"\((.+?)\)", filename) # 괄호 안 추출
+                furnace_match = re.search(r"\((.+?)\)", filename)
 
                 work_date = date_match.group(1) if date_match else "날짜미상"
                 furnace_no = furnace_match.group(1) if furnace_match else "호기미상"
 
-                # -------------------------------------------------------
-                # [수정] 필터링 로직: '단조'가 포함된 경우 건너뛰기
-                # -------------------------------------------------------
+                # 단조 파일 필터링
                 if "단조" in furnace_no:
                     status_text.text(f"⛔ 제외됨 (단조): {filename}")
                     skip_count += 1
-                    # 진행률 업데이트 후 다음 파일로 넘어감
                     progress_bar.progress((idx + 1) / len(uploaded_files))
                     continue
 
                 status_text.text(f"🔄 처리 중: {filename}")
 
-                # (2) 헤더 위치 자동 탐색
+                # (2) 헤더 찾기 및 읽기
                 header_idx = find_header_row(uploaded_file, file_ext)
+                uploaded_file.seek(0)
 
-                # (3) 데이터 읽기
                 if file_ext == '.csv':
                     df = read_csv_with_encoding(uploaded_file, header=header_idx)
                 else:
                     df = pd.read_excel(uploaded_file, header=header_idx)
 
-                # (4) 유효한 데이터만 남기기 (수주NO가 있는 행만)
-                # 컬럼명에 '수주'가 포함된 컬럼 찾기
-                order_col = [c for c in df.columns if "수주" in str(c)]
+                # (3) 컬럼명 표준화 (데이터 누락 방지 핵심!)
+                df = clean_column_names(df)
+
+                # (4) 유효 데이터 필터링 ('수주NO' 컬럼이 있는 경우만)
+                target_cols = [c for c in df.columns if "수주" in str(c) or "NO" in str(c)]
                 
-                if order_col:
-                    target_col = order_col[0]
-                    df = df[df[target_col].notna()] # 수주번호 없는 행 삭제
+                if target_cols:
+                    # '수주NO' 또는 'NO' 컬럼이 비어있지 않은 행만 선택
+                    valid_rows = df[df[target_cols[0]].notna()].copy()
                     
-                    # (5) 메타데이터 열 추가 (맨 앞에 삽입)
-                    df.insert(0, '지시서번호(호기)', furnace_no)
-                    df.insert(0, '작업지시일', work_date)
-                    
-                    # (6) 통합
-                    master_df = pd.concat([master_df, df], ignore_index=True)
-                    success_count += 1
+                    if not valid_rows.empty:
+                        # 메타데이터 추가
+                        valid_rows.insert(0, '지시서번호(호기)', furnace_no)
+                        valid_rows.insert(0, '작업지시일', work_date)
+                        
+                        master_df = pd.concat([master_df, valid_rows], ignore_index=True)
+                        success_count += 1
+                    else:
+                        # 데이터는 없지만 파일은 정상인 경우 (빈 양식 등)
+                        pass
                 else:
-                    # 데이터는 읽었으나 '수주NO' 컬럼이 없는 경우
-                    pass
-                    # error_log.append(f"⚠️ {filename}: '수주NO' 컬럼 미발견 (데이터 없음)")
+                    error_log.append(f"⚠️ {filename}: 유효한 데이터 헤더를 찾을 수 없음")
                 
             except Exception as e:
                 error_log.append(f"❌ {filename}: {str(e)}")
             
-            # 진행률 업데이트
             progress_bar.progress((idx + 1) / len(uploaded_files))
 
         status_text.text("모든 작업 완료!")
@@ -151,8 +230,8 @@ if uploaded_files:
             st.success(f"✅ 통합 완료! (총 {success_count}개 파일 합침, {skip_count}개 단조 파일 제외)")
             
             if error_log:
-                st.warning(f"⚠️ {len(error_log)}개 파일 처리 중 오류 발생")
-                with st.expander("실패 로그 확인"):
+                st.warning(f"⚠️ {len(error_log)}개 파일 처리 중 문제 발생 (나머지는 정상 통합됨)")
+                with st.expander("문제 발생 로그 보기"):
                     for err in error_log:
                         st.write(err)
 
@@ -160,23 +239,20 @@ if uploaded_files:
             st.subheader("📊 통합 데이터 미리보기")
             st.dataframe(master_df.head())
 
-            # 엑셀 다운로드 (메모리 버퍼 사용)
+            # 엑셀 다운로드 (서식 적용)
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                master_df.to_excel(writer, index=False)
+                master_df.to_excel(writer, index=False, sheet_name='Sheet1')
+                style_excel(writer, master_df) # 서식 적용 함수 호출
             
             st.download_button(
-                label="📥 통합 엑셀 파일 다운로드",
+                label="📥 깔끔한 엑셀 파일 다운로드 (Click)",
                 data=buffer,
                 file_name="통합_RAW_DATA_결과.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            if skip_count > 0 and success_count == 0:
-                st.warning("단조 파일을 제외하고 나니 통합할 데이터가 없습니다.")
+            if skip_count > 0:
+                st.warning("단조 파일을 제외하니 통합할 유효 데이터가 없습니다.")
             else:
-                st.error("통합할 데이터가 없습니다. 아래 로그를 확인해주세요.")
-                if error_log:
-                    with st.expander("에러 상세 내용"):
-                        for err in error_log:
-                            st.write(err)
+                st.error("통합할 데이터가 없습니다. 파일을 확인해주세요.")
